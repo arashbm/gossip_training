@@ -106,13 +106,12 @@ class Node:
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
-            # print(f"epoch {i} loss:", epoch_loss)
 
-            print(f"current best validation loss:\t\t{current_valid_loss:.8f}")
             val_loss, val_acc = self.validate()
 
             if val_loss == 0 or val_loss > current_valid_loss:
                 self.model.load_state_dict(prev_params)
+                current_valid_loss = val_loss
                 print("breaking")
                 break
             else:
