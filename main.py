@@ -1,3 +1,4 @@
+import argparse
 from typing import Union
 import copy
 
@@ -75,11 +76,10 @@ class Node:
     def load_params(self, params: dict):
         self.model.load_state_dict(params)
 
-    def train(self, epochs: int, learning_rate: float, momentum: float):
+    def train(self, epochs: int,
+              learning_rate: float, momentum: float,
+              skd_beta: float, kd_alpha: float):
         self.model.train()
-        skd_beta = 0.99
-        kd_alpha = 1.0
-
         optimizer = torch.optim.SGD(
                 self.model.parameters(),
                 lr=learning_rate,
@@ -160,7 +160,21 @@ class Node:
 
 
 if __name__ == "__main__":
-    alpha = 1.6
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--users", type=int, default=20)
+    parser.add_argument("--edge-prob", type=int, default=0.2)
+    parser.add_argument("--t-max", type=int, default=1000)
+    parser.add_argument("--local-validation-split", type=float, default=.2)
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--learning-rate", type=float, default=0.001)
+    parser.add_argument("--momentum", type=float, default=0.5)
+    parser.add_argument("--zipf-alpha", type=float, default=1.6)
+
+    parser.add_argument("--kd-alpha", type=float, default=1.0)
+    parser.add_argument("--skd-beta", type=float, default=0.99)
+
+    args = parser.parse_args()
+
     dataset = torchvision.datasets.MNIST(
         root='./data', train=True, download=True,
         transform=torchvision.transforms.Compose([
@@ -175,12 +189,13 @@ if __name__ == "__main__":
             torchvision.transforms.Normalize(
                 (0.1307,), (0.3081,))]))
 
-    t_max = 1000
-    users = 20
-    validation_split = 0.2
     rng = np.random.default_rng()
     partitions = sampler.zipf_sampler(
-            alpha, users, dataset, validation_split, rng)
+            args.zipf_alpha,
+            args.users,
+            dataset,
+            args.local_validation_split,
+            random_state=rng)
     # for t, v in partitions:
     #     print(len(t), len(v))
     #     train_labels = np.array([target for _, target in t])
@@ -194,7 +209,7 @@ if __name__ == "__main__":
 
     input_shape = dataset[0][0].numel()
     output_shape = len(dataset.classes)
-    graph = nx.fast_gnp_random_graph(users, 0.2)
+    graph = nx.fast_gnp_random_graph(args.users, args.edge_prob, seed=rng)
 
     nodes = []
     for train, valid in partitions:
@@ -211,7 +226,7 @@ if __name__ == "__main__":
     accuracy_over_time.append(test_accuracy)
     print("mean test accuracy:", np.mean(accuracy_over_time, axis=1))
 
-    for t in tqdm(range(t_max)):
+    for t in tqdm(range(args.t_max)):
         new_states = []
         for i, node in enumerate(nodes):
             neighbours = [nodes[n] for n in graph[i]]
@@ -223,7 +238,11 @@ if __name__ == "__main__":
         test_accuracy = []
         for i, node in enumerate(nodes):
             node.load_params(new_states[i])
-            node.train(epochs=5, learning_rate=0.001, momentum=0.5)
+            node.train(epochs=args.epochs,
+                       learning_rate=args.learning_rate,
+                       momentum=args.momentum,
+                       skd_beta=args.skd_beta,
+                       kd_alpha=args.kd_alpha)
             acc = node.test(test_dataset)
             test_accuracy.append(acc)
         accuracy_over_time.append(test_accuracy)
