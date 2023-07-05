@@ -1,4 +1,6 @@
 import argparse
+import json
+import sys
 
 import numpy as np
 import torchvision
@@ -73,7 +75,9 @@ if __name__ == "__main__":
         acc = node.test(test_dataset)
         test_accuracy.append(acc)
     accuracy_over_time.append(test_accuracy)
-    print("mean test accuracy:", np.mean(accuracy_over_time, axis=1))
+    print("mean test accuracy:", np.mean(accuracy_over_time, axis=1),
+          file=sys.stderr)
+    print(json.dumps({"round": 0, "test_accuracies": test_accuracy}))
 
     for t in tqdm(range(args.t_max)):
         new_states = []
@@ -96,4 +100,6 @@ if __name__ == "__main__":
             test_accuracy.append(acc)
         accuracy_over_time.append(test_accuracy)
 
-        print("mean test accuracy:", np.mean(accuracy_over_time, axis=1))
+        print("mean test accuracy:", np.mean(accuracy_over_time, axis=1),
+              file=sys.stderr)
+        print(json.dumps({"round": t+1, "test_accuracies": test_accuracy}))

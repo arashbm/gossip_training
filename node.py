@@ -1,5 +1,7 @@
 from typing import Union
 import copy
+import sys
+
 import torch
 
 
@@ -112,7 +114,7 @@ class Node:
             if val_loss == 0 or val_loss > current_valid_loss:
                 self.model.load_state_dict(prev_params)
                 current_valid_loss = val_loss
-                print("breaking")
+                print("breaking", file=sys.stderr)
                 break
             else:
                 current_valid_loss = val_loss
@@ -135,7 +137,8 @@ class Node:
                             dim=1) == target).item()
                 total_loss += loss.item()
         accuracy = corrects/total
-        print(f"validation accuracy:\t{accuracy:.8f}\t{total_loss:.8f}")
+        print(f"validation accuracy:\t{accuracy:.8f}\t{total_loss:.8f}",
+              file=sys.stderr)
         return total_loss, accuracy
 
     def test(self, test_dataset: DatasetLike):
@@ -154,5 +157,5 @@ class Node:
                             torch.softmax(output, dim=1),
                             dim=1) == target).item()
         accuracy = corrects/total
-        print("test accuracy:", accuracy)
+        print("test accuracy:", accuracy, file=sys.stderr)
         return accuracy
