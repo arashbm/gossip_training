@@ -13,7 +13,7 @@ from node import Node, SimpleModel
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--users", type=int, default=20)
-    parser.add_argument("--edge-prob", type=int, default=0.2)
+    parser.add_argument("--edge-prob", type=float, default=0.2)
     parser.add_argument("--t-max", type=int, default=1000)
     parser.add_argument("--local-validation-split", type=float, default=.2)
     parser.add_argument("--epochs", type=int, default=5)
