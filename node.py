@@ -37,9 +37,9 @@ class Node:
         self.model = model
         self.data_size = len(train_dataset)
         self.training_dataset = torch.utils.data.dataloader.DataLoader(
-                train_dataset, batch_size=32, shuffle=True)
+                train_dataset, batch_size=32, shuffle=True, num_workers=4)
         self.validation_dataset = torch.utils.data.dataloader.DataLoader(
-                validation_dataset, batch_size=32)
+                validation_dataset, batch_size=32, num_workers=4)
 
     def aggregate_neighbours(self,
                              neighbours: list["Node"],
@@ -78,7 +78,8 @@ class Node:
 
     def train(self, epochs: int,
               learning_rate: float, momentum: float,
-              skd_beta: float, kd_alpha: float):
+              skd_beta: float, kd_alpha: float,
+              device: torch.device):
         self.model.train()
         optimizer = torch.optim.SGD(
                 self.model.parameters(),
@@ -93,6 +94,7 @@ class Node:
         for i in range(epochs):
             epoch_loss = 0
             for data, target in self.training_dataset:
+                data, target = data.to(device), target.to(device)
                 optimizer.zero_grad()
                 output = self.model(data)
 
@@ -109,7 +111,7 @@ class Node:
                 optimizer.step()
                 epoch_loss += loss.item()
 
-            val_loss, val_acc = self.validate()
+            val_loss, val_acc = self.validate(device=device)
 
             if val_loss == 0 or val_loss > current_valid_loss:
                 self.model.load_state_dict(prev_params)
@@ -119,7 +121,7 @@ class Node:
             else:
                 current_valid_loss = val_loss
 
-    def validate(self):
+    def validate(self, device: torch.device):
         self.model.eval()
         criterion = torch.nn.CrossEntropyLoss()
         total = 0
@@ -127,6 +129,7 @@ class Node:
         total_loss = 0
         with torch.no_grad():
             for data, target in self.validation_dataset:
+                data, target = data.to(device), target.to(device)
                 output = self.model(data)
                 loss = criterion(output, target)
                 total += target.shape[0]
@@ -141,14 +144,15 @@ class Node:
               file=sys.stderr)
         return total_loss, accuracy
 
-    def test(self, test_dataset: DatasetLike):
+    def test(self, test_dataset: DatasetLike, device: torch.device):
         self.model.eval()
         test_dataset = torch.utils.data.dataloader.DataLoader(
-                test_dataset, batch_size=32)
+                test_dataset, batch_size=32, num_workers=4)
         total = 0
         corrects = 0
         with torch.no_grad():
             for data, target in test_dataset:
+                data, target = data.to(device), target.to(device)
                 output = self.model(data)
                 total += target.shape[0]
                 corrects += \
