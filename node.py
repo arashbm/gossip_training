@@ -1,6 +1,7 @@
 from typing import Union
 import copy
 import sys
+import statistics
 
 import torch
 
@@ -12,22 +13,25 @@ DatasetLike = Union[torch.utils.data.Dataset,
 class SimpleModel(torch.nn.Module):
     def __init__(self, input_size, output_size):
         super(SimpleModel, self).__init__()
-        layer_sizes = [512, 256, 128]
 
         self.input_size = input_size
         self.output_size = output_size
-        self.layers = torch.nn.Sequential(
-            torch.nn.Linear(input_size, layer_sizes[0]),
-            torch.nn.ReLU(),
-            torch.nn.Linear(layer_sizes[0], layer_sizes[1]),
-            torch.nn.ReLU(),
-            torch.nn.Linear(layer_sizes[1], layer_sizes[2]),
-            torch.nn.ReLU(),
-            torch.nn.Linear(layer_sizes[2], output_size))
+        h1 = 512
+        h2 = 256
+        h3 = 128
+        self.fc1 = torch.nn.Linear(input_size, h1)
+        self.fc2 = torch.nn.Linear(h1, h2)
+        self.fc3 = torch.nn.Linear(h2, h3)
+        self.fc4 = torch.nn.Linear(h3, output_size)
+        self.relu = torch.nn.ReLU()
 
     def forward(self, x):
-        x = x.view(x.size(0), -1)
-        return self.layers(x)
+        x = x.view(-1, x.shape[1]*x.shape[-2]*x.shape[-1])
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        x = self.relu(self.fc3(x))
+        x = self.fc4(self.relu(x))
+        return x
 
 
 class Node:
@@ -41,12 +45,46 @@ class Node:
         self.validation_dataset = torch.utils.data.dataloader.DataLoader(
                 validation_dataset, batch_size=32, num_workers=4)
 
-    def aggregate_neighbours(self,
-                             neighbours: list["Node"],
-                             trusts: list[float]):
+    def aggregate_neighbours_decentralised(self,
+                                           neighbours: list["Node"],
+                                           trusts: list[float]):
+        total_neighbourhood_data = sum(
+                neighbour.data_size for neighbour in neighbours)
+        total_neighbourhood_data += self.data_size
 
+        # ratio of neighbours' data to total neighbourhood data (inc. self)
+        alphas = [neighbour.data_size/total_neighbourhood_data
+                  for neighbour in neighbours]
+
+        current_model_params = copy.deepcopy(self.model.state_dict())
+
+        if len(neighbours) == 0:
+            return current_model_params
+
+        self_trust = 1.
+        self_alpha = self.data_size/total_neighbourhood_data
+        avg_params = copy.deepcopy(self.model.state_dict())
+        for key in avg_params.keys():
+            avg_params[key] = torch.zeros_like(avg_params[key])
+
+        for key in avg_params.keys():
+            for i, neighbour in enumerate(neighbours):
+                neighbour_params = neighbour.model.state_dict()
+                avg_params[key] += \
+                    alphas[i]*trusts[i]*neighbour_params[key]
+
+            avg_params[key] += \
+                self_alpha*self_trust*current_model_params[key]
+
+        return avg_params
+
+    def aggregate_neighbours_virtual_teacher(self,
+                                             neighbours: list["Node"],
+                                             trusts: list[float]):
         total_neighbour_data = sum(
                 neighbour.data_size for neighbour in neighbours)
+
+        # ratio of neighbours' data to total neighbourhood data (w/o self)
         alphas = [neighbour.data_size/total_neighbour_data
                   for neighbour in neighbours]
 
@@ -57,18 +95,17 @@ class Node:
 
         avg_params = copy.deepcopy(self.model.state_dict())
         for key in avg_params.keys():
+            avg_params[key] = torch.zeros_like(avg_params[key])
+
+        for key in avg_params.keys():
             for i, neighbour in enumerate(neighbours):
                 neighbour_params = neighbour.model.state_dict()
-                if i == 0:
-                    avg_params[key] = \
-                            alphas[i]*trusts[i]*neighbour_params[key]
-                else:
-                    avg_params[key] += \
-                            alphas[i]*trusts[i]*neighbour_params[key]
+                avg_params[key] += \
+                    alphas[i]*trusts[i]*neighbour_params[key]
 
         for key in avg_params.keys():
             dist = current_model_params[key] - avg_params[key]
-            lp_dist = torch.norm(dist) + 1
+            lp_dist = torch.norm(dist, p=2) + 1
             current_model_params[key] -= dist/lp_dist
 
         return current_model_params
@@ -91,8 +128,9 @@ class Node:
         current_valid_loss = float("inf")
         prev_params = copy.deepcopy(self.model.state_dict())
 
+        epoch_losses = []
         for i in range(epochs):
-            epoch_loss = 0
+            batch_losses = []
             for data, target in self.training_dataset:
                 data, target = data.to(device), target.to(device)
                 optimizer.zero_grad()
@@ -107,9 +145,11 @@ class Node:
                         (1 - kd_alpha)*criterion(output, target) +
                         kd_alpha * torch.sum(kl, dim=1), dim=0)
 
+                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                epoch_loss += loss.item()
+                batch_losses.append(loss.item())
+            epoch_losses.append(statistics.mean(batch_losses))
 
             val_loss, val_acc = self.validate(device=device)
 
@@ -126,40 +166,36 @@ class Node:
         criterion = torch.nn.CrossEntropyLoss()
         total = 0
         corrects = 0
-        total_loss = 0
+        losses = 0
         with torch.no_grad():
             for data, target in self.validation_dataset:
                 data, target = data.to(device), target.to(device)
                 output = self.model(data)
                 loss = criterion(output, target)
-                total += target.shape[0]
-                corrects += \
-                    torch.count_nonzero(
-                        torch.argmax(
-                            torch.softmax(output, dim=1),
-                            dim=1) == target).item()
-                total_loss += loss.item()
+                losses += loss.item()
+                preds = torch.argmax(torch.softmax(output, dim=1), dim=1)
+                corrects += torch.count_nonzero(preds == target).item()
+                total += len(data)
         accuracy = corrects/total
-        print(f"validation accuracy:\t{accuracy:.8f}\t{total_loss:.8f}",
+        loss = losses/total
+        print(f"validation accuracy:\t{accuracy:.8f}\t{loss:.8f}",
               file=sys.stderr)
-        return total_loss, accuracy
+        return loss, accuracy
 
     def test(self, test_dataset: DatasetLike, device: torch.device):
         self.model.eval()
         test_dataset = torch.utils.data.dataloader.DataLoader(
                 test_dataset, batch_size=32, num_workers=4)
+
         total = 0
         corrects = 0
         with torch.no_grad():
             for data, target in test_dataset:
                 data, target = data.to(device), target.to(device)
                 output = self.model(data)
-                total += target.shape[0]
-                corrects += \
-                    torch.count_nonzero(
-                        torch.argmax(
-                            torch.softmax(output, dim=1),
-                            dim=1) == target).item()
+                preds = torch.argmax(torch.softmax(output, dim=1), dim=1)
+                corrects += torch.count_nonzero(preds == target).item()
+                total += len(data)
         accuracy = corrects/total
         print("test accuracy:", accuracy, file=sys.stderr)
         return accuracy

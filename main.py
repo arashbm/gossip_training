@@ -19,8 +19,16 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--momentum", type=float, default=0.5)
-    parser.add_argument("--zipf-alpha", type=float, default=1.6)
 
+    parser.add_argument("--data-distribution",
+                        choices=["zipf", "balanced_iid"],
+                        required=True)
+    parser.add_argument("--zipf-alpha", type=float, default=1.6)
+    parser.add_argument("--items-per-user", type=int)
+
+    parser.add_argument("--aggregation-method",
+                        choices=["vt", "dec"],
+                        required=True)
     parser.add_argument("--kd-alpha", type=float, default=1.0)
     parser.add_argument("--skd-beta", type=float, default=0.99)
 
@@ -46,22 +54,26 @@ if __name__ == "__main__":
                 (0.1307,), (0.3081,))]))
 
     rng = np.random.default_rng()
-    partitions = sampler.zipf_sampler(
-            args.zipf_alpha,
-            graph.number_of_nodes(),
-            dataset,
-            args.local_validation_split,
-            random_state=rng)
-    # for t, v in partitions:
-    #     print(len(t), len(v))
-    #     train_labels = np.array([target for _, target in t])
-    #     valid_labels = np.array([target for _, target in v])
-    #     print("train:",
-    #           "\t".join(f"{np.count_nonzero(train_labels == i)}"
-    #                     for i in range(10)))
-    #     print("valid:",
-    #           "\t".join(f"{np.count_nonzero(valid_labels == i)}"
-    #                     for i in range(10)))
+
+    partitions = None
+    if args.data_distribution == "zipf":
+        partitions = sampler.zipf_sampler(
+                args.zipf_alpha,
+                graph.number_of_nodes(),
+                dataset,
+                args.local_validation_split,
+                random_state=rng)
+    elif args.data_distribution == "balanced_iid":
+        partitions = sampler.balanced_iid_sampler(
+                users=graph.number_of_nodes(), dataset=dataset,
+                validation_split=args.local_validation_split,
+                random_state=rng, items_per_user=args.items_per_user)
+    else:
+        raise ValueError(
+                f"data distribution ``{args.data_distribution}''"
+                " is not defined.")
+
+    sampler.print_partition_counts(partitions)
 
     input_shape = dataset[0][0].numel()
     output_shape = len(dataset.classes)
@@ -84,14 +96,24 @@ if __name__ == "__main__":
           file=sys.stderr)
     print(json.dumps({"round": 0, "test_accuracies": test_accuracy}))
 
-    for t in tqdm(range(args.t_max)):
+    for t in tqdm(range(1, args.t_max)):
         new_states = {}
         for i, node in nodes.items():
             neighbours = [nodes[n] for n in graph[i]]
             trusts = [1.0 for _ in neighbours]
-            new_states[i] = \
-                node.aggregate_neighbours(
-                    neighbours, trusts)
+
+            if args.aggregation_method == "vt":
+                new_states[i] = \
+                    node.aggregate_neighbours_virtual_teacher(
+                        neighbours, trusts)
+            elif args.aggregation_method == "dec":
+                new_states[i] = \
+                    node.aggregate_neighbours_decentralised(
+                        neighbours, trusts)
+            else:
+                raise ValueError(
+                        f"aggregation method ``{args.aggregation_method}''"
+                        " is not defined")
 
         test_accuracy = {}
         for i, node in nodes.items():
@@ -108,4 +130,4 @@ if __name__ == "__main__":
         print("mean test accuracy:", np.mean(
             [list(a.values()) for a in accuracy_over_time], axis=1),
           file=sys.stderr)
-        print(json.dumps({"round": t+1, "test_accuracies": test_accuracy}))
+        print(json.dumps({"round": t, "test_accuracies": test_accuracy}))

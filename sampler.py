@@ -94,3 +94,24 @@ def balanced_iid_sampler(users: int, dataset: torch.utils.data.Dataset,
     return [(torch.utils.data.Subset(dataset, t),
              torch.utils.data.Subset(dataset, v))
             for t, v in zip(user_training, user_validation)]
+
+
+def print_partition_counts(partitions):
+    train_unique = set()
+    valid_unique = set()
+    for t, v in partitions:
+        train_counts = {}
+        valid_counts = {}
+        for item, label in t:
+            train_unique.add(item)
+            if label not in train_counts:
+                train_counts[label] = 0
+            train_counts[label] += 1
+
+        for item, label in v:
+            valid_unique.add(item)
+            if label not in valid_counts:
+                valid_counts[label] = 0
+            valid_counts[label] += 1
+        print("counts:", train_counts, valid_counts)
+    print("unique counts:", len(train_unique), len(valid_unique))
