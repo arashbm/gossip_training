@@ -9,7 +9,7 @@ import networkx as nx
 from tqdm import tqdm
 
 import sampler
-from node import Node, SimpleModel
+from node import Node, SimpleModel, calculate_model_std
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -85,16 +85,21 @@ if __name__ == "__main__":
             train, valid)
 
     accuracy_over_time = []
+    std_over_time = []
 
     test_accuracy = {}
     for i, node in nodes.items():
         test_accuracy[i] = node.test(test_dataset, device=device)
 
     accuracy_over_time.append(test_accuracy)
+    std_over_time.append(calculate_model_std(list(nodes.values())))
     print("mean test accuracy:", np.mean(
         [list(a.values()) for a in accuracy_over_time], axis=1),
           file=sys.stderr)
-    print(json.dumps({"round": 0, "test_accuracies": test_accuracy}))
+    print(json.dumps({
+        "round": 0,
+        "test_accuracies": test_accuracy,
+        "stds": std_over_time[-1].tolist()}))
 
     for t in tqdm(range(1, args.t_max)):
         new_states = {}
@@ -126,8 +131,13 @@ if __name__ == "__main__":
                        device=device)
             test_accuracy[i] = node.test(test_dataset, device=device)
         accuracy_over_time.append(test_accuracy)
+        std_over_time.append(calculate_model_std(list(nodes.values())))
 
         print("mean test accuracy:", np.mean(
             [list(a.values()) for a in accuracy_over_time], axis=1),
           file=sys.stderr)
-        print(json.dumps({"round": t, "test_accuracies": test_accuracy}))
+        print("model stds:", std_over_time, file=sys.stderr)
+        print(json.dumps({
+            "round": t,
+            "test_accuracies": test_accuracy,
+            "stds": std_over_time[-1].tolist()}))
