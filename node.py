@@ -34,6 +34,30 @@ class SimpleModel(torch.nn.Module):
         return x
 
 
+class VerySimpleModel(torch.nn.Module):
+    def __init__(self, input_size, output_size):
+        super(VerySimpleModel, self).__init__()
+
+        self.input_size = input_size
+        self.output_size = output_size
+        h1 = 10
+        h2 = 20
+        h3 = 10
+        self.fc1 = torch.nn.Linear(input_size, h1)
+        self.fc2 = torch.nn.Linear(h1, h2)
+        self.fc3 = torch.nn.Linear(h2, h3)
+        self.fc4 = torch.nn.Linear(h3, output_size)
+        self.relu = torch.nn.ReLU()
+
+    def forward(self, x):
+        x = x.view(-1, x.shape[1]*x.shape[-2]*x.shape[-1])
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        x = self.relu(self.fc3(x))
+        x = self.fc4(self.relu(x))
+        return x
+
+
 class Node:
     def __init__(self, model: torch.nn.Module,
                  train_dataset: DatasetLike,
@@ -159,6 +183,7 @@ class Node:
                 print("breaking", file=sys.stderr)
                 break
             else:
+                prev_params = copy.deepcopy(self.model.state_dict())
                 current_valid_loss = val_loss
 
     def validate(self, device: torch.device):
@@ -199,3 +224,20 @@ class Node:
         accuracy = corrects/total
         print("test accuracy:", accuracy, file=sys.stderr)
         return accuracy
+
+    def flattened_parameters(self):
+        return torch.cat([param.view(-1) for param in self.model.parameters()])
+
+
+def calculate_model_std(nodes: list[Node]):
+    if len(nodes) == 0:
+        raise ValueError("at least one model is required")
+    with torch.no_grad():
+        first_model_params = nodes[0].flattened_parameters()
+        all_params = torch.zeros(len(nodes), first_model_params.size(0))
+
+        for i, node in enumerate(nodes):
+            all_params[i] = node.flattened_parameters()
+
+        std_dev = all_params.std(dim=0)
+    return std_dev
