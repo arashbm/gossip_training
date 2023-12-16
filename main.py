@@ -10,12 +10,13 @@ from tqdm import tqdm
 
 import sampler
 from node import Node, SimpleModel, calculate_model_std
+from decoder import TorchTensorEncoder
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("graph")
     parser.add_argument("--t-max", type=int, default=1000)
-    parser.add_argument("--local-validation-split", type=float, default=.2)
+    parser.add_argument("--validation-split", type=float, default=.2)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--momentum", type=float, default=0.5)
@@ -27,10 +28,19 @@ if __name__ == "__main__":
     parser.add_argument("--items-per-user", type=int)
 
     parser.add_argument("--aggregation-method",
-                        choices=["vt", "dec"],
+                        choices=["decdiff", "avg"],
+                        required=True)
+
+    parser.add_argument("--training-method",
+                        choices=["vt", "simple"],
                         required=True)
     parser.add_argument("--kd-alpha", type=float, default=1.0)
     parser.add_argument("--skd-beta", type=float, default=0.99)
+
+    parser.add_argument("--early-stopping",
+                        action=argparse.BooleanOptionalAction)
+
+    parser.add_argument("--pretrained-model", type=str)
 
     args = parser.parse_args()
 
@@ -58,16 +68,17 @@ if __name__ == "__main__":
     partitions = None
     if args.data_distribution == "zipf":
         partitions = sampler.zipf_sampler(
-                args.zipf_alpha,
-                graph.number_of_nodes(),
-                dataset,
-                args.local_validation_split,
+                alpha=args.zipf_alpha,
+                users=graph.number_of_nodes(),
+                dataset=dataset,
+                validation_split=args.validation_split,
                 random_state=rng)
     elif args.data_distribution == "balanced_iid":
         partitions = sampler.balanced_iid_sampler(
                 users=graph.number_of_nodes(), dataset=dataset,
-                validation_split=args.local_validation_split,
-                random_state=rng, items_per_user=args.items_per_user)
+                validation_split=args.validation_split,
+                random_state=rng,
+                items_per_user=args.items_per_user)
     else:
         raise ValueError(
                 f"data distribution ``{args.data_distribution}''"
@@ -76,30 +87,34 @@ if __name__ == "__main__":
     sampler.print_partition_counts(partitions)
 
     input_shape = dataset[0][0].numel()
-    output_shape = len(dataset.classes)
+    output_shape = len(dataset.class_to_idx)
 
     nodes = {}
     for (train, valid), node in zip(partitions, graph.nodes):
-        nodes[node] = Node(
-            SimpleModel(input_shape, output_shape).to(device),
-            train, valid)
+        model = SimpleModel(input_shape, output_shape).to(device)
+        if args.pretrained_model:
+            model.load_state_dict(torch.load(args.pretrained_model))
+        nodes[node] = Node(model, train, valid)
 
     accuracy_over_time = []
-    std_over_time = []
 
     test_accuracy = {}
+    test_loss = {}
     for i, node in nodes.items():
-        test_accuracy[i] = node.test(test_dataset, device=device)
+        loss, acc = node.test(test_dataset, device=device)
+        test_accuracy[i] = acc
+        test_loss[i] = loss
 
     accuracy_over_time.append(test_accuracy)
-    std_over_time.append(calculate_model_std(list(nodes.values())))
     print("mean test accuracy:", np.mean(
         [list(a.values()) for a in accuracy_over_time], axis=1),
           file=sys.stderr)
     print(json.dumps({
         "round": 0,
         "test_accuracies": test_accuracy,
-        "stds": std_over_time[-1].tolist()}))
+        "test_losses": test_loss,
+        "stds": calculate_model_std(list(nodes.values()))
+        }, cls=TorchTensorEncoder))
 
     for t in tqdm(range(1, args.t_max)):
         new_states = {}
@@ -107,13 +122,13 @@ if __name__ == "__main__":
             neighbours = [nodes[n] for n in graph[i]]
             trusts = [1.0 for _ in neighbours]
 
-            if args.aggregation_method == "vt":
+            if args.aggregation_method == "decdiff":
                 new_states[i] = \
-                    node.aggregate_neighbours_virtual_teacher(
+                    node.aggregate_neighbours_decdiff(
                         neighbours, trusts)
-            elif args.aggregation_method == "dec":
+            elif args.aggregation_method == "avg":
                 new_states[i] = \
-                    node.aggregate_neighbours_decentralised(
+                    node.aggregate_neighbours_simple_mean(
                         neighbours, trusts)
             else:
                 raise ValueError(
@@ -121,23 +136,40 @@ if __name__ == "__main__":
                         " is not defined")
 
         test_accuracy = {}
+        test_loss = {}
         for i, node in nodes.items():
             node.load_params(new_states[i])
-            node.train(epochs=args.epochs,
-                       learning_rate=args.learning_rate,
-                       momentum=args.momentum,
-                       skd_beta=args.skd_beta,
-                       kd_alpha=args.kd_alpha,
-                       device=device)
-            test_accuracy[i] = node.test(test_dataset, device=device)
+            if args.training_method == "vt":
+                node.train_virtual_teacher(
+                        epochs=args.epochs,
+                        learning_rate=args.learning_rate,
+                        momentum=args.momentum,
+                        skd_beta=args.skd_beta,
+                        kd_alpha=args.kd_alpha,
+                        device=device,
+                        early_stopping=args.early_stopping)
+            elif args.training_method == "simple":
+                node.train_simple(
+                        epochs=args.epochs,
+                        learning_rate=args.learning_rate,
+                        momentum=args.momentum,
+                        device=device,
+                        early_stopping=args.early_stopping)
+            else:
+                raise ValueError(
+                        f"training method ``{args.training_method}''"
+                        " is not defined")
+            loss, acc = node.test(test_dataset, device=device)
+            test_accuracy[i] = acc
+            test_loss[i] = loss
         accuracy_over_time.append(test_accuracy)
-        std_over_time.append(calculate_model_std(list(nodes.values())))
 
         print("mean test accuracy:", np.mean(
             [list(a.values()) for a in accuracy_over_time], axis=1),
           file=sys.stderr)
-        print("model stds:", std_over_time, file=sys.stderr)
         print(json.dumps({
             "round": t,
             "test_accuracies": test_accuracy,
-            "stds": std_over_time[-1].tolist()}))
+            "test_losses": test_loss,
+            "stds": calculate_model_std(list(nodes.values()))
+            }, cls=TorchTensorEncoder))

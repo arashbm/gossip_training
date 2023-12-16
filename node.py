@@ -69,9 +69,9 @@ class Node:
         self.validation_dataset = torch.utils.data.dataloader.DataLoader(
                 validation_dataset, batch_size=32, num_workers=4)
 
-    def aggregate_neighbours_decentralised(self,
-                                           neighbours: list["Node"],
-                                           trusts: list[float]):
+    def aggregate_neighbours_simple_mean(self,
+                                         neighbours: list["Node"],
+                                         trusts: list[float]):
         total_neighbourhood_data = sum(
                 neighbour.data_size for neighbour in neighbours)
         total_neighbourhood_data += self.data_size
@@ -102,9 +102,9 @@ class Node:
 
         return avg_params
 
-    def aggregate_neighbours_virtual_teacher(self,
-                                             neighbours: list["Node"],
-                                             trusts: list[float]):
+    def aggregate_neighbours_decdiff(self,
+                                     neighbours: list["Node"],
+                                     trusts: list[float]):
         total_neighbour_data = sum(
                 neighbour.data_size for neighbour in neighbours)
 
@@ -137,37 +137,38 @@ class Node:
     def load_params(self, params: dict):
         self.model.load_state_dict(params)
 
-    def train(self, epochs: int,
-              learning_rate: float, momentum: float,
-              skd_beta: float, kd_alpha: float,
-              device: torch.device):
+    def train_simple(self, epochs: int,
+                     learning_rate: float,
+                     momentum: float,
+                     device: torch.device,
+                     early_stopping=True):
         self.model.train()
         optimizer = torch.optim.SGD(
                 self.model.parameters(),
                 lr=learning_rate,
                 momentum=momentum)
         criterion = torch.nn.CrossEntropyLoss(reduction='none')
-        kl_loss = torch.nn.KLDivLoss(reduction='none')
 
         current_valid_loss = float("inf")
         prev_params = copy.deepcopy(self.model.state_dict())
 
         epoch_losses = []
-        for i in range(epochs):
+
+        for epoch in range(epochs):
             batch_losses = []
+            corrects = 0
+            total = 0
+
             for data, target in self.training_dataset:
                 data, target = data.to(device), target.to(device)
                 optimizer.zero_grad()
                 output = self.model(data)
 
-                onehot = torch.nn.functional.one_hot(
-                        target, self.model.output_size)
-                t_prob = skd_beta*onehot + \
-                    (1 - onehot)*(1 - skd_beta)/(self.model.output_size - 1)
-                kl = kl_loss(torch.log_softmax(output, dim=1), t_prob)
-                loss = torch.nanmean(
-                        (1 - kd_alpha)*criterion(output, target) +
-                        kd_alpha * torch.sum(kl, dim=1), dim=0)
+                loss = torch.mean(criterion(output, target), dim=0)
+
+                preds = torch.argmax(torch.softmax(output, dim=1), dim=1)
+                corrects += torch.count_nonzero(preds == target).item()
+                total += len(data)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -177,18 +178,78 @@ class Node:
 
             val_loss, val_acc = self.validate(device=device)
 
-            if val_loss == 0 or val_loss > current_valid_loss:
+            if early_stopping and val_loss > current_valid_loss:
                 self.model.load_state_dict(prev_params)
                 current_valid_loss = val_loss
-                print("breaking", file=sys.stderr)
+                print(f"breaking at epoch {epoch}", file=sys.stderr)
                 break
             else:
                 prev_params = copy.deepcopy(self.model.state_dict())
                 current_valid_loss = val_loss
+        print(f"best validation loss: {current_valid_loss:.8f}",
+              file=sys.stderr)
+
+    def train_virtual_teacher(self, epochs: int,
+                              learning_rate: float, momentum: float,
+                              skd_beta: float, kd_alpha: float,
+                              device: torch.device,
+                              early_stopping=True):
+        self.model.train()
+        optimizer = torch.optim.SGD(
+                self.model.parameters(),
+                lr=learning_rate,
+                momentum=momentum)
+        criterion = torch.nn.CrossEntropyLoss(reduction='none')
+        kl_loss = torch.nn.KLDivLoss(reduction='none', log_target=False)
+
+        current_valid_loss = float("inf")
+        prev_params = copy.deepcopy(self.model.state_dict())
+
+        epoch_losses = []
+        for epoch in range(epochs):
+            batch_losses = []
+            corrects = 0
+            total = 0
+            for data, target in self.training_dataset:
+                data, target = data.to(device), target.to(device)
+                optimizer.zero_grad()
+                output = self.model(data)
+
+                onehot = torch.nn.functional.one_hot(
+                        target, self.model.output_size)
+                t_prob = skd_beta*onehot + \
+                    (1 - onehot)*(1 - skd_beta)/(self.model.output_size - 1)
+                kl = kl_loss(torch.softmax(output, dim=1), t_prob)
+                loss = torch.nanmean(
+                        (1 - kd_alpha)*criterion(output, target) +
+                        kd_alpha * torch.sum(kl, dim=1), dim=0)
+
+                preds = torch.argmax(torch.softmax(output, dim=1), dim=1)
+                corrects += torch.count_nonzero(preds == target).item()
+                total += len(data)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                batch_losses.append(loss.item())
+            epoch_losses.append(statistics.mean(batch_losses))
+
+            val_loss, val_acc = self.validate(device=device)
+
+            if early_stopping and val_loss > current_valid_loss:
+                self.model.load_state_dict(prev_params)
+                current_valid_loss = val_loss
+                print(f"breaking at epoch {epoch}", file=sys.stderr)
+                break
+            else:
+                prev_params = copy.deepcopy(self.model.state_dict())
+                current_valid_loss = val_loss
+            print(f"best validation loss: {current_valid_loss:.8f}",
+                  file=sys.stderr)
 
     def validate(self, device: torch.device):
         self.model.eval()
-        criterion = torch.nn.CrossEntropyLoss()
+        criterion = torch.nn.CrossEntropyLoss(reduction='sum')
         total = 0
         corrects = 0
         losses = 0
@@ -203,27 +264,29 @@ class Node:
                 total += len(data)
         accuracy = corrects/total
         loss = losses/total
-        print(f"validation accuracy:\t{accuracy:.8f}\t{loss:.8f}",
-              file=sys.stderr)
         return loss, accuracy
 
     def test(self, test_dataset: DatasetLike, device: torch.device):
         self.model.eval()
         test_dataset = torch.utils.data.dataloader.DataLoader(
-                test_dataset, batch_size=32, num_workers=4)
-
+                test_dataset, batch_size=64, num_workers=4)
+        criterion = torch.nn.CrossEntropyLoss(reduction='sum')
         total = 0
         corrects = 0
+        losses = 0
         with torch.no_grad():
             for data, target in test_dataset:
                 data, target = data.to(device), target.to(device)
                 output = self.model(data)
+                losses += criterion(output, target).item()
                 preds = torch.argmax(torch.softmax(output, dim=1), dim=1)
                 corrects += torch.count_nonzero(preds == target).item()
                 total += len(data)
         accuracy = corrects/total
-        print("test accuracy:", accuracy, file=sys.stderr)
-        return accuracy
+        loss = losses/total
+        print(f"test loss: {loss:.8f}\taccuracy: {accuracy:.8f}",
+              file=sys.stderr)
+        return loss, accuracy
 
     def flattened_parameters(self):
         return torch.cat([param.view(-1) for param in self.model.parameters()])
@@ -233,11 +296,12 @@ def calculate_model_std(nodes: list[Node]):
     if len(nodes) == 0:
         raise ValueError("at least one model is required")
     with torch.no_grad():
-        first_model_params = nodes[0].flattened_parameters()
-        all_params = torch.zeros(len(nodes), first_model_params.size(0))
+        states = {name: torch.zeros(len(nodes), *tensor.shape)
+                  for name, tensor in nodes[0].model.state_dict().items()}
 
         for i, node in enumerate(nodes):
-            all_params[i] = node.flattened_parameters()
+            for name, tensor in node.model.state_dict().items():
+                states[name][i] = tensor
 
-        std_dev = all_params.std(dim=0)
-    return std_dev
+        return {name: tensor.std(dim=0)
+                for name, tensor in states.items()}
