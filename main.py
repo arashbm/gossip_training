@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+import resource
 
 import numpy as np
 import torch
@@ -9,7 +10,7 @@ import networkx as nx
 from tqdm import tqdm
 
 import sampler
-from node import Node, SimpleModel, calculate_model_std
+from node import Node, SimpleModel, stds_across_nodes, stds_across_params
 from decoder import TorchTensorEncoder
 
 if __name__ == "__main__":
@@ -41,10 +42,14 @@ if __name__ == "__main__":
                         action=argparse.BooleanOptionalAction)
 
     parser.add_argument("--pretrained-model", type=str)
+    parser.add_argument("--parameter-samples", type=int, default=100)
 
     args = parser.parse_args()
 
     graph = nx.read_edgelist(args.graph)
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"using device {device}", file=sys.stderr)
@@ -90,11 +95,19 @@ if __name__ == "__main__":
     output_shape = len(dataset.class_to_idx)
 
     nodes = {}
+    model_class = SimpleModel
     for (train, valid), node in zip(partitions, graph.nodes):
-        model = SimpleModel(input_shape, output_shape).to(device)
+        model = model_class(input_shape, output_shape,
+                            gain=graph.number_of_nodes()**0.5).to(device)
         if args.pretrained_model:
             model.load_state_dict(torch.load(args.pretrained_model))
-        nodes[node] = Node(model, train, valid)
+        nodes[node] = Node(model, train, valid, device)
+
+    with torch.no_grad():
+        node = nodes[list(graph.nodes())[0]]
+        param_sample_indecies = {
+            k: torch.randperm(v.numel())[:args.parameter_samples].to(device)
+            for k, v in node.model.named_parameters()}
 
     accuracy_over_time = []
 
@@ -113,23 +126,32 @@ if __name__ == "__main__":
         "round": 0,
         "test_accuracies": test_accuracy,
         "test_losses": test_loss,
-        "stds": calculate_model_std(list(nodes.values()))
+        "params": {
+            n: nodes[n].model.param_sample(param_sample_indecies)
+            for n in graph.nodes},
+        "stds_across_nodes": stds_across_nodes(
+            list(nodes.values()), param_sample_indecies),
+        "stds_across_params": stds_across_params(
+            list(nodes.values())),
         }, cls=TorchTensorEncoder))
 
     for t in tqdm(range(1, args.t_max)):
         new_states = {}
+        aggregation_changes = {}
         for i, node in nodes.items():
             neighbours = [nodes[n] for n in graph[i]]
             trusts = [1.0 for _ in neighbours]
 
             if args.aggregation_method == "decdiff":
-                new_states[i] = \
+                new_states[i], aggregation_changes[i] = \
                     node.aggregate_neighbours_decdiff(
-                        neighbours, trusts)
+                        neighbours, trusts,
+                        param_sample_indecies=param_sample_indecies)
             elif args.aggregation_method == "avg":
-                new_states[i] = \
+                new_states[i], aggregation_changes[i] = \
                     node.aggregate_neighbours_simple_mean(
-                        neighbours, trusts)
+                        neighbours, trusts,
+                        param_sample_indecies=param_sample_indecies)
             else:
                 raise ValueError(
                         f"aggregation method ``{args.aggregation_method}''"
@@ -137,24 +159,27 @@ if __name__ == "__main__":
 
         test_accuracy = {}
         test_loss = {}
+        training_changes = {}
         for i, node in nodes.items():
             node.load_params(new_states[i])
             if args.training_method == "vt":
-                node.train_virtual_teacher(
+                training_changes[i] = node.train_virtual_teacher(
                         epochs=args.epochs,
                         learning_rate=args.learning_rate,
                         momentum=args.momentum,
                         skd_beta=args.skd_beta,
                         kd_alpha=args.kd_alpha,
                         device=device,
-                        early_stopping=args.early_stopping)
+                        early_stopping=args.early_stopping,
+                        param_sample_indecies=param_sample_indecies)
             elif args.training_method == "simple":
-                node.train_simple(
+                training_changes[i] = node.train_simple(
                         epochs=args.epochs,
                         learning_rate=args.learning_rate,
                         momentum=args.momentum,
                         device=device,
-                        early_stopping=args.early_stopping)
+                        early_stopping=args.early_stopping,
+                        param_sample_indecies=param_sample_indecies)
             else:
                 raise ValueError(
                         f"training method ``{args.training_method}''"
@@ -171,5 +196,13 @@ if __name__ == "__main__":
             "round": t,
             "test_accuracies": test_accuracy,
             "test_losses": test_loss,
-            "stds": calculate_model_std(list(nodes.values()))
+            "training_changes": training_changes,
+            "aggregation_changes": aggregation_changes,
+            "params": {
+                n: nodes[n].model.param_sample(param_sample_indecies)
+                for n in graph.nodes},
+            "stds_across_nodes": stds_across_nodes(
+                list(nodes.values()), param_sample_indecies),
+            "stds_across_params": stds_across_params(
+                list(nodes.values())),
             }, cls=TorchTensorEncoder))
