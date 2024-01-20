@@ -77,7 +77,7 @@ if __name__ == "__main__":
     train, valid = partitions[0]
     node = Node(
         SimpleModel(input_shape, output_shape).to(device),
-        train, valid)
+        train, valid, device)
 
     accuracy_over_time = []
 

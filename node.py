@@ -87,12 +87,10 @@ class Node:
         self.data_size = len(train_dataset)
         self.training_dataset = torch.utils.data.dataloader.DataLoader(
                 train_dataset, batch_size=32, shuffle=True, num_workers=4,
-                prefetch_factor=4,
-                pin_memory=True, pin_memory_device=str(pin_memory_device))
+                prefetch_factor=4)
         self.validation_dataset = torch.utils.data.dataloader.DataLoader(
                 validation_dataset, batch_size=32, num_workers=4,
-                prefetch_factor=4,
-                pin_memory=True, pin_memory_device=str(pin_memory_device))
+                prefetch_factor=4)
 
     @torch.no_grad()
     def aggregate_neighbours_simple_mean(
@@ -314,8 +312,7 @@ class Node:
         self.model.eval()
         test_dataset = torch.utils.data.dataloader.DataLoader(
                 test_dataset, batch_size=64, num_workers=2,
-                prefetch_factor=4,
-                pin_memory=True, pin_memory_device=str(device))
+                prefetch_factor=4)
         criterion = torch.nn.CrossEntropyLoss(reduction='sum')
         total = 0
         corrects = 0
@@ -329,8 +326,6 @@ class Node:
             total += len(data)
         accuracy = corrects/total
         loss = losses/total
-        print(f"test loss: {loss:.8f}\taccuracy: {accuracy:.8f}",
-              file=sys.stderr)
         return loss, accuracy
 
 

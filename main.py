@@ -13,6 +13,19 @@ import sampler
 from node import Node, SimpleModel, stds_across_nodes, stds_across_params
 from decoder import TorchTensorEncoder
 
+
+def save_state(nodes: dict[str, Node], round: int, filename: str):
+    states = {}
+    for v, node in nodes.items():
+        states[v] = {
+                "dict": node.state_dict(),
+                "subsets": {
+                    "training": node.training_dataset.indices,
+                    "validation": node.validation_dataset.indeces
+                }}
+    torch.save({"round": t, "states": states}, filename)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("graph")
@@ -43,6 +56,8 @@ if __name__ == "__main__":
 
     parser.add_argument("--pretrained-model", type=str)
     parser.add_argument("--parameter-samples", type=int, default=100)
+
+    parser.add_argument("--checkpoint-file", type=str)
 
     args = parser.parse_args()
 
@@ -113,7 +128,7 @@ if __name__ == "__main__":
 
     test_accuracy = {}
     test_loss = {}
-    for i, node in nodes.items():
+    for i, node in tqdm(nodes.items()):
         loss, acc = node.test(test_dataset, device=device)
         test_accuracy[i] = acc
         test_loss[i] = loss
@@ -160,7 +175,7 @@ if __name__ == "__main__":
         test_accuracy = {}
         test_loss = {}
         training_changes = {}
-        for i, node in nodes.items():
+        for i, node in tqdm(nodes.items()):
             node.load_params(new_states[i])
             if args.training_method == "vt":
                 training_changes[i] = node.train_virtual_teacher(
@@ -206,3 +221,4 @@ if __name__ == "__main__":
             "stds_across_params": stds_across_params(
                 list(nodes.values())),
             }, cls=TorchTensorEncoder))
+    save_state(nodes=nodes, round=t, filename=args.checkpoint_file)
