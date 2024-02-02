@@ -17,9 +17,10 @@ def zipf_probs(alpha: float, users: int, support: list[int],
 def zipf_sampler(alpha: float, users: int, dataset: torch.utils.data.Dataset,
                  validation_split: float,
                  random_state: np.random.Generator):
-    label_indeces = dataset.class_to_idx.values()
+    targets = torch.tensor([t for _, t in dataset])
+    label_indeces = torch.unique(targets)
     classes = len(label_indeces)
-    support = [torch.count_nonzero(dataset.targets == c).item()
+    support = [torch.count_nonzero(targets == c).item()
                for c in label_indeces]
 
     probs = zipf_probs(alpha, users, support, random_state)
@@ -27,7 +28,7 @@ def zipf_sampler(alpha: float, users: int, dataset: torch.utils.data.Dataset,
     partitions = [[] for u in range(users)]
     for c in range(classes):
         user_probs = np.roll(probs, c)
-        class_ids = torch.where(dataset.targets == c)[0].numpy()
+        class_ids = torch.where(targets == c)[0].numpy()
         random_state.shuffle(class_ids)
 
         offset = 0
@@ -58,12 +59,13 @@ def balanced_iid_sampler(users: int, dataset: torch.utils.data.Dataset,
                          validation_split: float,
                          random_state: np.random.Generator,
                          items_per_user: Optional[int] = None):
-    label_indeces = dataset.class_to_idx.values()
+    targets = torch.tensor([t for _, t in dataset])
+    label_indeces = torch.unique(targets)
     classes = len(label_indeces)
 
     if items_per_user is None:
         smallest_class = min(
-                torch.count_nonzero(dataset.targets == c).item()
+                torch.count_nonzero(targets == c).item()
                 for c in range(classes))
         items_per_user = (smallest_class*classes)//users
         print(smallest_class, file=sys.stderr)
@@ -74,7 +76,7 @@ def balanced_iid_sampler(users: int, dataset: torch.utils.data.Dataset,
     user_training = [[] for i in range(users)]
     user_validation = [[] for i in range(users)]
     for c in range(classes):
-        class_ids = torch.where(dataset.targets == c)[0].numpy()
+        class_ids = torch.where(targets == c)[0].numpy()
         random_state.shuffle(class_ids)
         for u in range(users):
             user_training[u].extend(
@@ -103,12 +105,14 @@ def print_partition_counts(partitions):
         train_counts = {}
         valid_counts = {}
         for item, label in t:
+            label = label.item()
             train_unique.add(item)
             if label not in train_counts:
                 train_counts[label] = 0
             train_counts[label] += 1
 
         for item, label in v:
+            label = label.item()
             valid_unique.add(item)
             if label not in valid_counts:
                 valid_counts[label] = 0

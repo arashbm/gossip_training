@@ -4,11 +4,11 @@ import sys
 
 import numpy as np
 import torch
-import torchvision
 from tqdm import tqdm
 
 import sampler
-from node import Node, SimpleModel, stds_across_nodes, stds_across_params
+from node import Node, SimpleModel, stds_across_params
+from main import load_mnist
 from decoder import TorchTensorEncoder
 
 
@@ -42,19 +42,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"using device {device}", file=sys.stderr)
 
-    dataset = torchvision.datasets.MNIST(
-        root='./data', train=True, download=True,
-        transform=torchvision.transforms.Compose([
-            torchvision.transforms.ToTensor(),
-            torchvision.transforms.Normalize(
-                (0.1307,), (0.3081,))]))
-
-    test_dataset = torchvision.datasets.MNIST(
-        root='./data', train=False, download=True,
-        transform=torchvision.transforms.Compose([
-            torchvision.transforms.ToTensor(),
-            torchvision.transforms.Normalize(
-                (0.1307,), (0.3081,))]))
+    dataset, test_dataset = load_mnist(device)
 
     rng = np.random.default_rng()
 
@@ -79,7 +67,8 @@ if __name__ == "__main__":
     sampler.print_partition_counts(partitions)
 
     input_shape = dataset[0][0].numel()
-    output_shape = len(dataset.classes)
+    output_shape = len(torch.unique(
+        torch.tensor([t for _, t in dataset])))
 
     train, valid = partitions[0]
     node = Node(

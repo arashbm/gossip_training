@@ -81,16 +81,15 @@ class VerySimpleModel(torch.nn.Module):
 class Node:
     def __init__(self, model: torch.nn.Module,
                  train_dataset: DatasetLike,
-                 validation_dataset: DatasetLike,
-                 pin_memory_device: torch.device):
+                 validation_dataset: DatasetLike):
         self.model = model
         self.data_size = len(train_dataset)
         self.training_dataset = torch.utils.data.dataloader.DataLoader(
-                train_dataset, batch_size=32, shuffle=True, num_workers=4,
-                prefetch_factor=4)
+                train_dataset, batch_size=32, shuffle=True,
+                collate_fn=lambda x: x)
         self.validation_dataset = torch.utils.data.dataloader.DataLoader(
-                validation_dataset, batch_size=32, num_workers=4,
-                prefetch_factor=4)
+                validation_dataset, batch_size=32,
+                collate_fn=lambda x: x)
 
     @torch.no_grad()
     def aggregate_neighbours_simple_mean(
@@ -311,8 +310,8 @@ class Node:
     def test(self, test_dataset: DatasetLike, device: torch.device):
         self.model.eval()
         test_dataset = torch.utils.data.dataloader.DataLoader(
-                test_dataset, batch_size=64, num_workers=2,
-                prefetch_factor=4)
+                test_dataset, batch_size=64,
+                collate_fn=lambda x: x)
         criterion = torch.nn.CrossEntropyLoss(reduction='sum')
         total = 0
         corrects = 0
